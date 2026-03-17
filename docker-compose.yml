@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: everest
+      POSTGRES_USER: everest
+      POSTGRES_PASSWORD: everest
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U everest -d everest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://everest:everest@db:5432/everest
+      SOURCE_MODE: fedresurs
+      WORKER_COUNT: 1
+      REQUEST_DELAY_SECONDS: 0
+      RETRY_ATTEMPTS: 3
+      RETRY_BACKOFF_BASE_SECONDS: 1
+      RETRY_BACKOFF_MULTIPLIER: 2
+      LOG_LEVEL: INFO
+    volumes:
+      - ./:/app
+    command: ["--help"]
+
+volumes:
+  postgres_data:
