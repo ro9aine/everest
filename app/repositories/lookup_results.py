@@ -12,14 +12,13 @@ from app.models import FedresursLookupResultModel, KadArbitrLookupResultModel
 @dataclass(slots=True, frozen=True)
 class FedresursLookupPayload:
     inn: str
-    number: str
     timestamp: datetime
 
 
 @dataclass(slots=True, frozen=True)
 class KadArbitrLookupPayload:
     number: str
-    timestamp: datetime | None
+    reg_date: datetime | None
     document_name: str | None
 
 
@@ -28,12 +27,17 @@ class FedresursLookupRepository:
         self._session = session
 
     def insert(self, payload: FedresursLookupPayload) -> FedresursLookupResultModel:
-        record = FedresursLookupResultModel(
-            inn=payload.inn,
-            number=payload.number,
-            timestamp=payload.timestamp,
+        record = self._session.scalar(
+            select(FedresursLookupResultModel).where(FedresursLookupResultModel.inn == payload.inn)
         )
-        self._session.add(record)
+        if record is None:
+            record = FedresursLookupResultModel(
+                inn=payload.inn,
+                timestamp=payload.timestamp,
+            )
+            self._session.add(record)
+        else:
+            record.timestamp = payload.timestamp
         self._session.flush()
         return record
 
@@ -49,7 +53,7 @@ class KadArbitrLookupRepository:
     def insert(self, payload: KadArbitrLookupPayload) -> KadArbitrLookupResultModel:
         record = KadArbitrLookupResultModel(
             number=payload.number,
-            timestamp=payload.timestamp,
+            reg_date=payload.reg_date,
             document_name=payload.document_name,
         )
         self._session.add(record)

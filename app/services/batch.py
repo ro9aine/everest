@@ -72,12 +72,12 @@ class BatchProcessingService:
     def _process_row(self, inn: str) -> None:
         person = self._get_first_person(inn)
         number = self._get_bankruptcy_number(person)
-        self._save_fedresurs_result(inn=inn, number=number)
+        self._save_fedresurs_result(inn=inn)
 
         card_info = self._get_kad_card_info(number)
         self._save_kad_result(
             number=number,
-            timestamp=card_info.get("LatestDocumentDate"),
+            reg_date=card_info.get("RegDate"),
             document_name=card_info.get("ResultText"),
         )
 
@@ -112,13 +112,12 @@ class BatchProcessingService:
             raise ValueError("KAD search payload contains an invalid first item")
         return self._kad_parser.get_card_info(items[0])
 
-    def _save_fedresurs_result(self, *, inn: str, number: str) -> None:
+    def _save_fedresurs_result(self, *, inn: str) -> None:
         with self._session_factory() as session:
             repository = FedresursLookupRepository(session)
             repository.insert(
                 FedresursLookupPayload(
                     inn=inn,
-                    number=number,
                     timestamp=datetime.utcnow(),
                 )
             )
@@ -128,7 +127,7 @@ class BatchProcessingService:
         self,
         *,
         number: str,
-        timestamp: datetime | None,
+        reg_date: datetime | None,
         document_name: str | None,
     ) -> None:
         with self._session_factory() as session:
@@ -136,7 +135,7 @@ class BatchProcessingService:
             repository.insert(
                 KadArbitrLookupPayload(
                     number=number,
-                    timestamp=timestamp,
+                    reg_date=reg_date,
                     document_name=document_name,
                 )
             )

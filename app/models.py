@@ -13,7 +13,6 @@ class FedresursLookupResultModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     inn: Mapped[str] = mapped_column(String(32), unique=True, index=True)
-    number: Mapped[str] = mapped_column(String(64), index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=False))
 
 
@@ -22,5 +21,5 @@ class KadArbitrLookupResultModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     number: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    reg_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     document_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

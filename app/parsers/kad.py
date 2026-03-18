@@ -166,6 +166,14 @@ class KadParser:
             return None
         return result_link.get_text(" ", strip=True)
 
+    @classmethod
+    def _extract_reg_date(cls, html: str) -> datetime | None:
+        soup = BeautifulSoup(html, "html.parser")
+        reg_date_node = soup.select_one(".b-reg-date")
+        if reg_date_node is None:
+            return None
+        return cls._parse_datetime(reg_date_node.get_text(" ", strip=True))
+
     @staticmethod
     def _parse_datetime(value: str | None) -> datetime | None:
         if not value:
@@ -284,6 +292,7 @@ class KadParser:
         return {
             "CardId": card_id,
             "CardUrl": card_url,
+            "RegDate": self._extract_reg_date(response.text),
             "ResultText": self._extract_card_result_text(response.text),
             "Documents": documents,
             "LatestDocumentDate": latest_document["DocumentDate"] if latest_document else None,

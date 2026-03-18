@@ -109,7 +109,7 @@ def test_batch_service_processes_inn_and_persists_both_results() -> None:
                 "card-1": {
                     "CardId": "card-1",
                     "CardUrl": "https://kad.arbitr.ru/Card/card-1",
-                    "LatestDocumentDate": datetime(2024, 2, 10, 10, 0, 0),
+                    "RegDate": datetime(2024, 2, 10, 10, 0, 0),
                     "ResultText": "Order",
                 }
             },
@@ -130,12 +130,11 @@ def test_batch_service_processes_inn_and_persists_both_results() -> None:
 
     assert len(fedresurs_rows) == 1
     assert fedresurs_rows[0].inn == "1234567890"
-    assert fedresurs_rows[0].number == "A40-1/2024"
     assert fedresurs_rows[0].timestamp is not None
 
     assert len(kad_rows) == 1
     assert kad_rows[0].number == "A40-1/2024"
-    assert kad_rows[0].timestamp == datetime(2024, 2, 10, 10, 0, 0)
+    assert kad_rows[0].reg_date == datetime(2024, 2, 10, 10, 0, 0)
     assert kad_rows[0].document_name == "Order"
 
 

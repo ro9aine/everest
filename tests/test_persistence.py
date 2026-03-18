@@ -32,26 +32,25 @@ def test_fedresurs_repository_enforces_unique_inn() -> None:
 
     with session_factory() as session:
         repository = FedresursLookupRepository(session)
-        repository.insert(
+        first = repository.insert(
             FedresursLookupPayload(
                 inn="1234567890",
-                number="A40-1/2024",
                 timestamp=datetime(2024, 1, 10, 9, 5, 0),
             )
         )
-        with pytest.raises(IntegrityError):
-            repository.insert(
-                FedresursLookupPayload(
-                    inn="1234567890",
-                    number="A40-2/2024",
-                    timestamp=datetime(2024, 1, 11, 9, 5, 0),
-                )
+        second = repository.insert(
+            FedresursLookupPayload(
+                inn="1234567890",
+                timestamp=datetime(2024, 1, 11, 9, 5, 0),
             )
+        )
+        session.commit()
 
-        session.rollback()
         rows = repository.list_by_inn("1234567890")
 
-    assert len(rows) == 0
+    assert len(rows) == 1
+    assert first.id == second.id
+    assert rows[0].timestamp == datetime(2024, 1, 11, 9, 5, 0)
 
 
 def test_kad_repository_enforces_unique_number() -> None:
@@ -64,7 +63,7 @@ def test_kad_repository_enforces_unique_number() -> None:
         repository.insert(
             KadArbitrLookupPayload(
                 number="A40-1/2024",
-                timestamp=datetime(2024, 2, 10, 10, 0, 0),
+                reg_date=datetime(2024, 2, 10, 10, 0, 0),
                 document_name="Order",
             )
         )
@@ -72,7 +71,7 @@ def test_kad_repository_enforces_unique_number() -> None:
             repository.insert(
                 KadArbitrLookupPayload(
                     number="A40-1/2024",
-                    timestamp=datetime(2024, 2, 11, 10, 0, 0),
+                    reg_date=datetime(2024, 2, 11, 10, 0, 0),
                     document_name="Notice",
                 )
             )

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from unittest.mock import Mock
 
 import pytest
@@ -245,6 +246,7 @@ def test_kad_get_card_info(card_input, expected_url) -> None:
     session = make_kad_session()
     response = Mock()
     response.text = """
+        <span class="b-reg-date">24.09.2025</span>
         <h2 class="b-case-result">
             <a target="_blank" href="https://kad.arbitr.ru/Kad/PdfDocument/test">
                 <i class="b-icon pdf"><i></i></i>
@@ -294,3 +296,20 @@ def test_kad_get_card_info_without_result_text() -> None:
     assert result["CardUrl"] == "https://kad.arbitr.ru/Card/test-card-id"
     assert result["ResultText"] is None
     assert result["Html"] == "<html>card</html>"
+
+
+def test_kad_get_card_info_extracts_reg_date() -> None:
+    session = make_kad_session()
+    response = Mock()
+    response.text = """
+        <div class="b-case-chrono">
+            <span class="b-reg-date">24.09.2025</span>
+        </div>
+    """
+    session.get.return_value = response
+    parser = KadParser(session=session)
+    parser.init = Mock()
+
+    result = parser.get_card_info("test-card-id")
+
+    assert result["RegDate"] == datetime(2025, 9, 24, 0, 0, 0)
