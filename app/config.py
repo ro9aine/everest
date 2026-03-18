@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_DATABASE_URL = "sqlite:///./everest.db"
-DEFAULT_SOURCE_MODE = "fedresurs"
 DEFAULT_LOG_LEVEL = "INFO"
 
 
@@ -34,36 +33,10 @@ def _get_env_str(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
-def _get_env_int(name: str, default: int, *, minimum: int | None = None) -> int:
-    value = int(os.getenv(name, str(default)))
-    if minimum is not None:
-        value = max(minimum, value)
-    return value
-
-
-def _get_env_float(name: str, default: float, *, minimum: float | None = None) -> float:
-    value = float(os.getenv(name, str(default)))
-    if minimum is not None:
-        value = max(minimum, value)
-    return value
-
-
-@dataclass(slots=True, frozen=True)
-class ExecutionSettings:
-    """Execution controls for batch processing."""
-
-    worker_count: int = 1
-    retry_attempts: int = 3
-    retry_backoff_base_seconds: float = 1.0
-    retry_backoff_multiplier: float = 2.0
-    request_delay_seconds: float = 0.0
-
-
 @dataclass(slots=True, frozen=True)
 class HttpClientSettings:
-    """Optional HTTP client configuration shared across sources."""
+    """Optional HTTP client configuration shared across parsers."""
 
-    proxy_url: str | None = None
     user_agent: str | None = None
 
 
@@ -76,21 +49,9 @@ class LoggingSettings:
 
 @dataclass(slots=True, frozen=True)
 class Settings:
-    """Centralized application settings loaded from environment variables.
-
-    Configuration strategy:
-    - ``DATABASE_URL`` controls the SQLAlchemy engine target
-    - ``SOURCE_MODE`` can provide a default batch source for the CLI
-    - execution controls come from ``WORKER_COUNT``, ``REQUEST_DELAY_SECONDS``,
-      ``RETRY_ATTEMPTS``, ``RETRY_BACKOFF_BASE_SECONDS``, and
-      ``RETRY_BACKOFF_MULTIPLIER``
-    - ``LOG_LEVEL`` controls stdout-friendly structured logging
-    - ``PROXY_URL`` and ``USER_AGENT`` provide optional HTTP overrides
-    """
+    """Centralized application settings loaded from environment variables."""
 
     database_url: str = DEFAULT_DATABASE_URL
-    source_mode: str = DEFAULT_SOURCE_MODE
-    execution: ExecutionSettings = field(default_factory=ExecutionSettings)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     http: HttpClientSettings = field(default_factory=HttpClientSettings)
 
@@ -99,27 +60,10 @@ class Settings:
         _load_dotenv(dotenv_path)
         return cls(
             database_url=_get_env_str("DATABASE_URL", DEFAULT_DATABASE_URL),
-            source_mode=_get_env_str("SOURCE_MODE", DEFAULT_SOURCE_MODE),
-            execution=ExecutionSettings(
-                worker_count=_get_env_int("WORKER_COUNT", 1, minimum=1),
-                retry_attempts=_get_env_int("RETRY_ATTEMPTS", 3, minimum=1),
-                retry_backoff_base_seconds=_get_env_float(
-                    "RETRY_BACKOFF_BASE_SECONDS",
-                    1.0,
-                    minimum=0.0,
-                ),
-                retry_backoff_multiplier=_get_env_float(
-                    "RETRY_BACKOFF_MULTIPLIER",
-                    2.0,
-                    minimum=1.0,
-                ),
-                request_delay_seconds=_get_env_float("REQUEST_DELAY_SECONDS", 0.0, minimum=0.0),
-            ),
             logging=LoggingSettings(
                 level=_get_env_str("LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(),
             ),
             http=HttpClientSettings(
-                proxy_url=os.getenv("PROXY_URL"),
                 user_agent=os.getenv("USER_AGENT"),
             ),
         )

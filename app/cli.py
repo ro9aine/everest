@@ -4,8 +4,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from pytest import main as pytest_main
-
 from app.config import Settings
 from app.db import create_db_engine, create_session_factory, init_db
 from app.excel import ExcelInputError
@@ -14,10 +12,14 @@ from app.services import BatchProcessingService
 
 
 def test_unit() -> int:
+    from pytest import main as pytest_main
+
     return pytest_main(["tests/test_parsers.py", "-s"])
 
 
 def test_integration() -> int:
+    from pytest import main as pytest_main
+
     return pytest_main(["tests/test_parsers_integration.py", "-m", "integration", "-s"])
 
 
