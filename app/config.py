@@ -33,6 +33,20 @@ def _get_env_str(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
+def _get_env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    value = int(os.getenv(name, str(default)))
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def _get_env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+    value = float(os.getenv(name, str(default)))
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
 @dataclass(slots=True, frozen=True)
 class HttpClientSettings:
     """Optional HTTP client configuration shared across parsers."""
@@ -48,12 +62,22 @@ class LoggingSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class RetrySettings:
+    """Retry configuration for transient parser request failures."""
+
+    attempts: int = 3
+    backoff_seconds: float = 1.0
+    backoff_multiplier: float = 2.0
+
+
+@dataclass(slots=True, frozen=True)
 class Settings:
     """Centralized application settings loaded from environment variables."""
 
     database_url: str = DEFAULT_DATABASE_URL
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     http: HttpClientSettings = field(default_factory=HttpClientSettings)
+    retry: RetrySettings = field(default_factory=RetrySettings)
 
     @classmethod
     def from_env(cls, *, dotenv_path: str = ".env") -> "Settings":
@@ -65,5 +89,10 @@ class Settings:
             ),
             http=HttpClientSettings(
                 user_agent=os.getenv("USER_AGENT"),
+            ),
+            retry=RetrySettings(
+                attempts=_get_env_int("RETRY_ATTEMPTS", 3, minimum=1),
+                backoff_seconds=_get_env_float("RETRY_BACKOFF_SECONDS", 1.0, minimum=0.0),
+                backoff_multiplier=_get_env_float("RETRY_BACKOFF_MULTIPLIER", 2.0, minimum=1.0),
             ),
         )

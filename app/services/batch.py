@@ -6,9 +6,11 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import Settings
 from app.excel import ExcelInputReader
 from app.parsers.fedresurs import FedResursParser
 from app.parsers.kad import KadParser
+from app.parsers.retrying import RetryPolicy, RetryingFedResursParser, RetryingKadParser
 from app.repositories.lookup_results import (
     FedresursLookupPayload,
     FedresursLookupRepository,
@@ -37,9 +39,21 @@ class BatchProcessingService:
     ) -> None:
         self._session_factory = session_factory
         self._excel_reader = excel_reader or ExcelInputReader()
-        self._fedresurs_parser = fedresurs_parser or FedResursParser()
-        self._kad_parser = kad_parser or KadParser()
         self._logger = logger or logging.getLogger(__name__)
+        settings = Settings.from_env()
+        retry_policy = RetryPolicy(
+            attempts=settings.retry.attempts,
+            backoff_seconds=settings.retry.backoff_seconds,
+            backoff_multiplier=settings.retry.backoff_multiplier,
+        )
+        self._fedresurs_parser = fedresurs_parser or RetryingFedResursParser(
+            FedResursParser(),
+            retry_policy=retry_policy,
+        )
+        self._kad_parser = kad_parser or RetryingKadParser(
+            KadParser(),
+            retry_policy=retry_policy,
+        )
 
     def run(self, *, input_path: str, column: str) -> BatchProcessingSummary:
         input_batch = self._excel_reader.read(input_path, column=column)
