@@ -35,7 +35,9 @@ class InputBatch:
 
 
 class ExcelInputReader:
-    """Reads identifiers from XLSX files using the first row as the header row."""
+    """Reads identifiers from XLSX files using the detected header row."""
+
+    HEADER_SCAN_LIMIT = 25
 
     def read(self, path: str, *, sheet: str | None = None, column: str) -> InputBatch:
         workbook_path = Path(path)
@@ -51,7 +53,7 @@ class ExcelInputReader:
 
         try:
             worksheet = self._select_sheet(workbook, sheet)
-            header_row = next(worksheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+            header_row_number, header_row = self._find_header_row(worksheet, column)
             if header_row is None:
                 return InputBatch(rows=(), skipped_empty=0)
 
@@ -59,8 +61,8 @@ class ExcelInputReader:
             rows: list[InputRow] = []
             skipped_empty = 0
             for row_number, row in enumerate(
-                worksheet.iter_rows(min_row=2, values_only=True),
-                start=2,
+                worksheet.iter_rows(min_row=header_row_number + 1, values_only=True),
+                start=header_row_number + 1,
             ):
                 cell_value = row[column_index] if column_index < len(row) else None
                 normalized = self._normalize_cell_value(cell_value)
@@ -80,6 +82,18 @@ class ExcelInputReader:
         if sheet not in workbook.sheetnames:
             raise ExcelSheetNotFoundError(f"Worksheet '{sheet}' was not found in the workbook")
         return workbook[sheet]
+
+    def _find_header_row(self, worksheet, column: str) -> tuple[int, tuple[object, ...] | None]:
+        for row_number, row in enumerate(
+            worksheet.iter_rows(min_row=1, max_row=self.HEADER_SCAN_LIMIT, values_only=True),
+            start=1,
+        ):
+            try:
+                self._find_column_index(row, column)
+            except ExcelColumnNotFoundError:
+                continue
+            return row_number, row
+        raise ExcelColumnNotFoundError(f"Column '{column}' was not found in the worksheet header")
 
     @staticmethod
     def _find_column_index(header_row: tuple[object, ...], column: str) -> int:

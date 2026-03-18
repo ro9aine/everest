@@ -4,6 +4,10 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+DEFAULT_DATABASE_URL = "sqlite:///./everest.db"
+DEFAULT_SOURCE_MODE = "fedresurs"
+DEFAULT_LOG_LEVEL = "INFO"
+
 
 def _load_dotenv(path: str = ".env") -> None:
     """Load simple KEY=VALUE pairs from a local .env file into the environment.
@@ -84,8 +88,8 @@ class Settings:
     - ``PROXY_URL`` and ``USER_AGENT`` provide optional HTTP overrides
     """
 
-    database_url: str = "sqlite:///./everest.db"
-    source_mode: str = "fedresurs"
+    database_url: str = DEFAULT_DATABASE_URL
+    source_mode: str = DEFAULT_SOURCE_MODE
     execution: ExecutionSettings = field(default_factory=ExecutionSettings)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     http: HttpClientSettings = field(default_factory=HttpClientSettings)
@@ -94,8 +98,8 @@ class Settings:
     def from_env(cls, *, dotenv_path: str = ".env") -> "Settings":
         _load_dotenv(dotenv_path)
         return cls(
-            database_url=_get_env_str("DATABASE_URL", cls.database_url),
-            source_mode=_get_env_str("SOURCE_MODE", cls.source_mode),
+            database_url=_get_env_str("DATABASE_URL", DEFAULT_DATABASE_URL),
+            source_mode=_get_env_str("SOURCE_MODE", DEFAULT_SOURCE_MODE),
             execution=ExecutionSettings(
                 worker_count=_get_env_int("WORKER_COUNT", 1, minimum=1),
                 retry_attempts=_get_env_int("RETRY_ATTEMPTS", 3, minimum=1),
@@ -112,7 +116,7 @@ class Settings:
                 request_delay_seconds=_get_env_float("REQUEST_DELAY_SECONDS", 0.0, minimum=0.0),
             ),
             logging=LoggingSettings(
-                level=_get_env_str("LOG_LEVEL", "INFO").upper(),
+                level=_get_env_str("LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(),
             ),
             http=HttpClientSettings(
                 proxy_url=os.getenv("PROXY_URL"),

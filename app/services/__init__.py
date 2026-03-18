@@ -1,7 +1,6 @@
-from app.services.batch import BatchProcessingService, BatchProcessingSummary, BatchSource
+from app.services.batch import BatchProcessingService, BatchProcessingSummary
 
 __all__ = [
     "BatchProcessingService",
     "BatchProcessingSummary",
-    "BatchSource",
 ]

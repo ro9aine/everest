@@ -1,24 +1,14 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.adapters import (
-    BlockedByUpstreamError,
-    FedresursParserAdapter,
-    KadArbitrParserAdapter,
-    MalformedResponseError,
-    NotFoundError,
-    TemporaryNetworkError,
-)
-from app.config import ExecutionSettings
 from app.excel import ExcelInputReader
-from app.execution import ExecutionPolicy, RateLimiter, RetryPolicy, execute_with_retry
+from app.parsers.fedresurs import FedResursParser
+from app.parsers.kad import KadParser
 from app.repositories.lookup_results import (
     FedresursLookupPayload,
     FedresursLookupRepository,
@@ -27,377 +17,134 @@ from app.repositories.lookup_results import (
 )
 
 
-class BatchSource(StrEnum):
-    FEDRESURS = "fedresurs"
-    KAD = "kad"
-
-
-class ProcessingStatus(StrEnum):
-    PROCESSING = "processing"
-    SUCCESS = "success"
-    NOT_FOUND = "not_found"
-    TEMPORARY_FAILURE = "temporary_failure"
-    PERMANENT_FAILURE = "permanent_failure"
-
-
 @dataclass(slots=True)
 class BatchProcessingSummary:
     total: int = 0
     success: int = 0
-    not_found: int = 0
-    temporary_failures: int = 0
-    permanent_failures: int = 0
+    failed: int = 0
     skipped: int = 0
-
-    def record(self, outcome: ProcessingStatus | None) -> None:
-        if outcome == ProcessingStatus.SUCCESS:
-            self.success += 1
-        elif outcome == ProcessingStatus.NOT_FOUND:
-            self.not_found += 1
-        elif outcome == ProcessingStatus.TEMPORARY_FAILURE:
-            self.temporary_failures += 1
-        elif outcome == ProcessingStatus.PERMANENT_FAILURE:
-            self.permanent_failures += 1
-        elif outcome is None:
-            self.skipped += 1
 
 
 class BatchProcessingService:
-    """Processes XLSX rows against one source and persists each row result."""
-
     def __init__(
         self,
         session_factory: sessionmaker[Session],
         *,
         excel_reader: ExcelInputReader | None = None,
-        fedresurs_adapter: FedresursParserAdapter | None = None,
-        kad_adapter: KadArbitrParserAdapter | None = None,
-        execution_settings: ExecutionSettings | None = None,
+        fedresurs_parser: FedResursParser | None = None,
+        kad_parser: KadParser | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._excel_reader = excel_reader or ExcelInputReader()
-        self._fedresurs_adapter = fedresurs_adapter or FedresursParserAdapter()
-        self._kad_adapter = kad_adapter or KadArbitrParserAdapter()
-        effective_settings = execution_settings or ExecutionSettings()
-        self._execution_policy = ExecutionPolicy(
-            worker_count=max(1, effective_settings.worker_count),
-            request_delay_seconds=max(0.0, effective_settings.request_delay_seconds),
-            retry_policy=RetryPolicy(
-                max_attempts=max(1, effective_settings.retry_attempts),
-                backoff_base_seconds=max(0.0, effective_settings.retry_backoff_base_seconds),
-                backoff_multiplier=max(1.0, effective_settings.retry_backoff_multiplier),
-            ),
-        )
-        self._rate_limiter = RateLimiter(self._execution_policy.request_delay_seconds)
+        self._fedresurs_parser = fedresurs_parser or FedResursParser()
+        self._kad_parser = kad_parser or KadParser()
         self._logger = logger or logging.getLogger(__name__)
 
-    def run(
-        self,
-        *,
-        source: BatchSource,
-        input_path: str,
-        sheet: str | None,
-        column: str,
-        resume: bool = False,
-        limit: int | None = None,
-    ) -> BatchProcessingSummary:
-        input_batch = self._excel_reader.read(input_path, sheet=sheet, column=column)
-        summary = BatchProcessingSummary(skipped=input_batch.skipped_empty)
-
-        rows = input_batch.rows[:limit] if limit is not None else input_batch.rows
-        summary.total = len(rows)
+    def run(self, *, input_path: str, column: str) -> BatchProcessingSummary:
+        input_batch = self._excel_reader.read(input_path, column=column)
+        summary = BatchProcessingSummary(
+            total=len(input_batch.rows),
+            skipped=input_batch.skipped_empty,
+        )
 
         try:
-            if self._execution_policy.worker_count <= 1:
-                for row in rows:
-                    summary.record(self._process_row(source, row.row_number, row.value, resume))
-            else:
-                with ThreadPoolExecutor(max_workers=self._execution_policy.worker_count) as executor:
-                    futures = [
-                        executor.submit(self._process_row, source, row.row_number, row.value, resume)
-                        for row in rows
-                    ]
-                    for future in as_completed(futures):
-                        summary.record(future.result())
+            for row in input_batch.rows:
+                try:
+                    self._process_row(row.value)
+                except Exception as exc:
+                    summary.failed += 1
+                    self._logger.error(
+                        "row=%s value=%s status=failed error=%s",
+                        row.row_number,
+                        row.value,
+                        exc,
+                    )
+                else:
+                    summary.success += 1
+                    self._logger.info("row=%s value=%s status=success", row.row_number, row.value)
         finally:
-            self._close_adapter(self._fedresurs_adapter)
-            self._close_adapter(self._kad_adapter)
+            self._close_session(self._fedresurs_parser)
+            self._close_session(self._kad_parser)
 
         return summary
 
-    def _process_row(
-        self,
-        source: BatchSource,
-        row_number: int,
-        value: str,
-        resume: bool,
-    ) -> ProcessingStatus | None:
-        if source == BatchSource.FEDRESURS:
-            return self._process_fedresurs_row(row_number, value, resume)
-        return self._process_kad_row(row_number, value, resume)
+    def _process_row(self, inn: str) -> None:
+        person = self._get_first_person(inn)
+        number = self._get_bankruptcy_number(person)
+        self._save_fedresurs_result(inn=inn, number=number)
 
-    def _process_fedresurs_row(
-        self,
-        row_number: int,
-        inn: str,
-        resume: bool,
-    ) -> ProcessingStatus | None:
+        card_info = self._get_kad_card_info(number)
+        self._save_kad_result(
+            number=number,
+            timestamp=card_info.get("LatestDocumentDate"),
+            document_name=card_info.get("ResultText"),
+        )
+
+    def _get_first_person(self, inn: str) -> dict:
+        persons_result = self._fedresurs_parser.find_persons(inn)
+        page_data = persons_result.get("pageData")
+        if not isinstance(page_data, list) or not page_data or not isinstance(page_data[0], dict):
+            raise ValueError(f"Fedresurs returned no persons for INN '{inn}'")
+        return page_data[0]
+
+    def _get_bankruptcy_number(self, person: dict) -> str:
+        guid = person.get("guid")
+        if not isinstance(guid, str) or not guid.strip():
+            raise ValueError("Fedresurs person payload is missing guid")
+
+        bankruptcy_result = self._fedresurs_parser.get_bankruptcy_info(guid.strip())
+        legal_cases = bankruptcy_result.get("legalCases")
+        if not isinstance(legal_cases, list) or not legal_cases or not isinstance(legal_cases[0], dict):
+            raise ValueError("Fedresurs bankruptcy payload is missing legalCases")
+
+        number = legal_cases[0].get("number")
+        if not isinstance(number, str) or not number.strip():
+            raise ValueError("Fedresurs bankruptcy payload is missing legalCases[0].number")
+        return number.strip()
+
+    def _get_kad_card_info(self, number: str) -> dict:
+        search_result = self._kad_parser.search_by_number(number)
+        items = search_result.get("Result", {}).get("Items")
+        if not isinstance(items, list) or not items:
+            raise ValueError(f"KAD returned no cases for number '{number}'")
+        if not isinstance(items[0], dict):
+            raise ValueError("KAD search payload contains an invalid first item")
+        return self._kad_parser.get_card_info(items[0])
+
+    def _save_fedresurs_result(self, *, inn: str, number: str) -> None:
         with self._session_factory() as session:
             repository = FedresursLookupRepository(session)
-            if resume and repository.has_terminal_status(inn):
-                self._logger.info("row=%s value=%s status=skipped reason=resume", row_number, inn)
-                return None
-
-            repository.mark_processing(inn, source=BatchSource.FEDRESURS.value)
+            repository.insert(
+                FedresursLookupPayload(
+                    inn=inn,
+                    number=number,
+                    timestamp=datetime.utcnow(),
+                )
+            )
             session.commit()
 
-            try:
-                result = execute_with_retry(
-                    lambda: self._fedresurs_adapter.get_bankruptcy_info(inn),
-                    retry_policy=self._execution_policy.retry_policy,
-                    rate_limiter=self._rate_limiter,
-                    on_retry=lambda attempt, max_attempts, delay, exc: self._logger.warning(
-                        "row=%s value=%s retry_attempt=%s/%s next_delay=%.2fs error=%s",
-                        row_number,
-                        inn,
-                        attempt,
-                        max_attempts,
-                        delay,
-                        exc,
-                    ),
-                )
-                repository.upsert(
-                    FedresursLookupPayload(
-                        inn=result.inn,
-                        case_number=result.bankruptcy_case_number,
-                        latest_date=result.latest_date,
-                        source=BatchSource.FEDRESURS.value,
-                        parsed_at=datetime.utcnow(),
-                        status=ProcessingStatus.SUCCESS.value,
-                    )
-                )
-                session.commit()
-                self._logger.info(
-                    "row=%s value=%s status=success case_number=%s",
-                    row_number,
-                    result.inn,
-                    result.bankruptcy_case_number,
-                )
-                return ProcessingStatus.SUCCESS
-            except NotFoundError as exc:
-                self._persist_fedresurs_failure(
-                    session=session,
-                    repository=repository,
-                    inn=inn,
-                    status=ProcessingStatus.NOT_FOUND,
-                    error_message=str(exc),
-                )
-                self._logger.warning("row=%s value=%s status=not_found error=%s", row_number, inn, exc)
-                return ProcessingStatus.NOT_FOUND
-            except TemporaryNetworkError as exc:
-                self._persist_fedresurs_failure(
-                    session=session,
-                    repository=repository,
-                    inn=inn,
-                    status=ProcessingStatus.TEMPORARY_FAILURE,
-                    error_message=str(exc),
-                )
-                self._logger.warning(
-                    "row=%s value=%s status=temporary_failure final_error=%s",
-                    row_number,
-                    inn,
-                    exc,
-                )
-                return ProcessingStatus.TEMPORARY_FAILURE
-            except (BlockedByUpstreamError, MalformedResponseError, ValueError) as exc:
-                self._persist_fedresurs_failure(
-                    session=session,
-                    repository=repository,
-                    inn=inn,
-                    status=ProcessingStatus.PERMANENT_FAILURE,
-                    error_message=str(exc),
-                )
-                self._logger.error(
-                    "row=%s value=%s status=permanent_failure error=%s",
-                    row_number,
-                    inn,
-                    exc,
-                )
-                return ProcessingStatus.PERMANENT_FAILURE
-            except Exception as exc:
-                self._persist_fedresurs_failure(
-                    session=session,
-                    repository=repository,
-                    inn=inn,
-                    status=ProcessingStatus.PERMANENT_FAILURE,
-                    error_message=str(exc),
-                )
-                self._logger.exception(
-                    "row=%s value=%s status=permanent_failure error=%s",
-                    row_number,
-                    inn,
-                    exc,
-                )
-                return ProcessingStatus.PERMANENT_FAILURE
-
-    def _process_kad_row(
+    def _save_kad_result(
         self,
-        row_number: int,
-        case_number: str,
-        resume: bool,
-    ) -> ProcessingStatus | None:
+        *,
+        number: str,
+        timestamp: datetime | None,
+        document_name: str | None,
+    ) -> None:
         with self._session_factory() as session:
             repository = KadArbitrLookupRepository(session)
-            if resume and repository.has_terminal_status(case_number):
-                self._logger.info("row=%s value=%s status=skipped reason=resume", row_number, case_number)
-                return None
-
-            repository.mark_processing(case_number, source=BatchSource.KAD.value)
+            repository.insert(
+                KadArbitrLookupPayload(
+                    number=number,
+                    timestamp=timestamp,
+                    document_name=document_name,
+                )
+            )
             session.commit()
 
-            try:
-                result = execute_with_retry(
-                    lambda: self._kad_adapter.get_case_documents(case_number),
-                    retry_policy=self._execution_policy.retry_policy,
-                    rate_limiter=self._rate_limiter,
-                    on_retry=lambda attempt, max_attempts, delay, exc: self._logger.warning(
-                        "row=%s value=%s retry_attempt=%s/%s next_delay=%.2fs error=%s",
-                        row_number,
-                        case_number,
-                        attempt,
-                        max_attempts,
-                        delay,
-                        exc,
-                    ),
-                )
-                repository.upsert(
-                    KadArbitrLookupPayload(
-                        case_number=result.case_number,
-                        latest_date=result.latest_date,
-                        document_name=result.latest_document_name,
-                        document_title_or_description=result.latest_document_title,
-                        source=BatchSource.KAD.value,
-                        parsed_at=datetime.utcnow(),
-                        status=ProcessingStatus.SUCCESS.value,
-                    )
-                )
-                session.commit()
-                self._logger.info(
-                    "row=%s value=%s status=success card_id=%s",
-                    row_number,
-                    result.case_number,
-                    result.card_id,
-                )
-                return ProcessingStatus.SUCCESS
-            except NotFoundError as exc:
-                self._persist_kad_failure(
-                    session=session,
-                    repository=repository,
-                    case_number=case_number,
-                    status=ProcessingStatus.NOT_FOUND,
-                    error_message=str(exc),
-                )
-                self._logger.warning(
-                    "row=%s value=%s status=not_found error=%s",
-                    row_number,
-                    case_number,
-                    exc,
-                )
-                return ProcessingStatus.NOT_FOUND
-            except TemporaryNetworkError as exc:
-                self._persist_kad_failure(
-                    session=session,
-                    repository=repository,
-                    case_number=case_number,
-                    status=ProcessingStatus.TEMPORARY_FAILURE,
-                    error_message=str(exc),
-                )
-                self._logger.warning(
-                    "row=%s value=%s status=temporary_failure final_error=%s",
-                    row_number,
-                    case_number,
-                    exc,
-                )
-                return ProcessingStatus.TEMPORARY_FAILURE
-            except (BlockedByUpstreamError, MalformedResponseError, ValueError) as exc:
-                self._persist_kad_failure(
-                    session=session,
-                    repository=repository,
-                    case_number=case_number,
-                    status=ProcessingStatus.PERMANENT_FAILURE,
-                    error_message=str(exc),
-                )
-                self._logger.error(
-                    "row=%s value=%s status=permanent_failure error=%s",
-                    row_number,
-                    case_number,
-                    exc,
-                )
-                return ProcessingStatus.PERMANENT_FAILURE
-            except Exception as exc:
-                self._persist_kad_failure(
-                    session=session,
-                    repository=repository,
-                    case_number=case_number,
-                    status=ProcessingStatus.PERMANENT_FAILURE,
-                    error_message=str(exc),
-                )
-                self._logger.exception(
-                    "row=%s value=%s status=permanent_failure error=%s",
-                    row_number,
-                    case_number,
-                    exc,
-                )
-                return ProcessingStatus.PERMANENT_FAILURE
-
     @staticmethod
-    def _persist_fedresurs_failure(
-        *,
-        session: Session,
-        repository: FedresursLookupRepository,
-        inn: str,
-        status: ProcessingStatus,
-        error_message: str,
-    ) -> None:
-        repository.upsert(
-            FedresursLookupPayload(
-                inn=inn,
-                case_number=None,
-                latest_date=None,
-                source=BatchSource.FEDRESURS.value,
-                parsed_at=datetime.utcnow(),
-                status=status.value,
-                error_message=error_message,
-            )
-        )
-        session.commit()
-
-    @staticmethod
-    def _persist_kad_failure(
-        *,
-        session: Session,
-        repository: KadArbitrLookupRepository,
-        case_number: str,
-        status: ProcessingStatus,
-        error_message: str,
-    ) -> None:
-        repository.upsert(
-            KadArbitrLookupPayload(
-                case_number=case_number,
-                latest_date=None,
-                document_name=None,
-                document_title_or_description=None,
-                source=BatchSource.KAD.value,
-                parsed_at=datetime.utcnow(),
-                status=status.value,
-                error_message=error_message,
-            )
-        )
-        session.commit()
-
-    @staticmethod
-    def _close_adapter(adapter: object) -> None:
-        close_method = getattr(adapter, "close", None)
-        if callable(close_method):
-            close_method()
+    def _close_session(parser: object) -> None:
+        session = getattr(parser, "session", None)
+        close = getattr(session, "close", None)
+        if callable(close):
+            close()

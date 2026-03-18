@@ -37,6 +37,23 @@ def test_excel_reader_raises_for_missing_column(tmp_path) -> None:
         ExcelInputReader().read(str(path), column="INN")
 
 
+def test_excel_reader_detects_header_below_title_row(tmp_path) -> None:
+    path = tmp_path / "input.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Random INNs"])
+    worksheet.append(["#", "Type", "INN", "Note"])
+    worksheet.append([1, "Organization", "6581334569", "10 digits"])
+    worksheet.append([2, "Organization", "4495719258", "10 digits"])
+    workbook.save(path)
+
+    result = ExcelInputReader().read(str(path), column="INN")
+
+    assert result.skipped_empty == 0
+    assert [row.value for row in result.rows] == ["6581334569", "4495719258"]
+    assert [row.row_number for row in result.rows] == [3, 4]
+
+
 def test_excel_reader_raises_for_missing_sheet(tmp_path) -> None:
     path = tmp_path / "input.xlsx"
     workbook = Workbook()

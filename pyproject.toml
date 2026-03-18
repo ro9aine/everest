@@ -32,6 +32,7 @@ pytest = "^8.0"
 playwright = "^1.51.0"
 
 [tool.pytest.ini_options]
+addopts = "-m \"not integration\""
 markers = [
     "integration: tests that hit real external services",
 ]

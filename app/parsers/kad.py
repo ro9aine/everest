@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -11,7 +12,7 @@ from app.parsers import build_headers
 
 class KadParser:
     BASE_URL = "https://kad.arbitr.ru"
-    DEFAULT_RECORDED_COOKIES_PATH = Path("recordings") / "kad_web_full_cookies.json"
+    DEFAULT_RECORDED_COOKIES_PATH = Path("kad_web_full_cookies.json")
     FALLBACK_CHROME_USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -29,7 +30,7 @@ class KadParser:
         self,
         session: requests.Session | None = None,
         *,
-        browser_cookies_path: str | Path | None = None,
+        browser_cookies_path: str | None = None,
     ) -> None:
         self.session = session or requests.Session()
         self.browser_cookies_path = (
@@ -96,26 +97,6 @@ class KadParser:
 
         return self.BASE_URL + "/Card/" + card, card
 
-    def _load_recorded_cookies(self) -> None:
-        if not self.browser_cookies_path.exists():
-            return
-
-        with self.browser_cookies_path.open(encoding="utf-8") as stream:
-            payload = json.load(stream)
-
-        cookies = payload.get("cookies", []) if isinstance(payload, dict) else payload
-        for cookie in cookies:
-            domain = cookie.get("domain", "")
-            if not domain.endswith("arbitr.ru"):
-                continue
-            self.session.cookies.set(
-                name=cookie["name"],
-                value=cookie["value"],
-                domain=domain or "kad.arbitr.ru",
-                path=cookie.get("path", "/"),
-                secure=bool(cookie.get("secure", False)),
-            )
-
     def _seed_runtime_cookies(self) -> None:
         for name, value in self.DEFAULT_RUNTIME_COOKIES.items():
             self.session.cookies.set(
@@ -125,6 +106,28 @@ class KadParser:
                 path="/",
                 secure=True,
             )
+
+    def _load_recorded_cookies(self) -> None:
+        if not self.browser_cookies_path.exists():
+            return
+
+        payload = json.loads(self.browser_cookies_path.read_text(encoding="utf-8"))
+        cookies = payload.get("cookies")
+        if not isinstance(cookies, list):
+            return
+
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            domain = cookie.get("domain")
+            name = cookie.get("name")
+            value = cookie.get("value")
+            path = cookie.get("path") or "/"
+            if not isinstance(domain, str) or not domain.endswith("arbitr.ru"):
+                continue
+            if not isinstance(name, str) or not isinstance(value, str):
+                continue
+            self.session.cookies.set(name=name, value=value, domain=domain, path=path)
 
     @staticmethod
     def _parse_search_instances_html(html: str) -> dict:
@@ -162,6 +165,61 @@ class KadParser:
         if result_link is None:
             return None
         return result_link.get_text(" ", strip=True)
+
+    @staticmethod
+    def _parse_datetime(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+        return None
+
+    @classmethod
+    def _extract_documents(cls, html: str) -> list[dict[str, datetime | str | None]]:
+        soup = BeautifulSoup(html, "html.parser")
+        documents: list[dict[str, datetime | str | None]] = []
+        seen: set[tuple[datetime | None, str | None, str | None]] = set()
+
+        for node in soup.select("tr, .b-case-document, .b-doc-item, .document, li"):
+            text = node.get_text(" ", strip=True)
+            if not text:
+                continue
+
+            date_match = re.search(r"\b\d{2}\.\d{2}\.\d{4}(?: \d{2}:\d{2}(?::\d{2})?)?\b", text)
+            document_date = cls._parse_datetime(date_match.group(0)) if date_match else None
+
+            document_name = None
+            for link in node.select("a"):
+                candidate = link.get_text(" ", strip=True)
+                if candidate:
+                    document_name = candidate
+                    break
+
+            document_title = text.replace(date_match.group(0), " ").strip() if date_match else text
+            document_title = " ".join(document_title.split()) or None
+            if document_title and document_name and document_title == document_name:
+                document_title = None
+
+            if not any((document_date, document_name, document_title)):
+                continue
+
+            key = (document_date, document_name, document_title)
+            if key in seen:
+                continue
+            seen.add(key)
+            documents.append(
+                {
+                    "DocumentDate": document_date,
+                    "DocumentName": document_name,
+                    "DocumentTitle": document_title,
+                }
+            )
+
+        documents.sort(key=lambda item: item["DocumentDate"] or datetime.min, reverse=True)
+        return documents
 
     def init(self) -> None:
         if self._initialized:
@@ -221,9 +279,14 @@ class KadParser:
         card_url, card_id = self._resolve_card_url(card)
         response = self.session.get(card_url, headers=self._document_headers(), timeout=30)
         response.raise_for_status()
+        documents = self._extract_documents(response.text)
+        latest_document = documents[0] if documents else None
         return {
             "CardId": card_id,
             "CardUrl": card_url,
             "ResultText": self._extract_card_result_text(response.text),
+            "Documents": documents,
+            "LatestDocumentDate": latest_document["DocumentDate"] if latest_document else None,
+            "LatestDocumentName": latest_document["DocumentName"] if latest_document else None,
             "Html": response.text,
         }
